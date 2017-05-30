@@ -11,10 +11,10 @@ CILIUM_CNI_CONF=${CILIUM_CNI_CONF:-${HOST_PREFIX}/etc/cni/net.d/${CNI_CONF_NAME}
 
 if [ ! -f ${CNI_DIR}/bin/loopback ]; then
 	echo "Installing loopback driver..."
-	mkdir tmp && cd tmp
-	wget https://storage.googleapis.com/kubernetes-release/network-plugins/cni-0799f5732f2a11b329d9e3d51b9c8f2e3759f2ff.tar.gz
+	mkdir -p tmp && cd tmp
+	curl -sS -L https://storage.googleapis.com/kubernetes-release/network-plugins/cni-0799f5732f2a11b329d9e3d51b9c8f2e3759f2ff.tar.gz -o cni.tar.gz
 	mkdir -p ${CNI_DIR}/bin
-	sudo tar -xvf cni-0799f5732f2a11b329d9e3d51b9c8f2e3759f2ff.tar.gz
+	sudo tar -xvf cni.tar.gz
 	cp bin/loopback ${CNI_DIR}/bin/
 	cd ..
 	rm -r tmp
