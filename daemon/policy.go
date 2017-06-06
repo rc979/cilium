@@ -32,6 +32,7 @@ import (
 	log "github.com/Sirupsen/logrus"
 	"github.com/go-openapi/runtime/middleware"
 	"github.com/op/go-logging"
+	"sync"
 )
 
 // GetCachedLabelList returns the cached labels for the given identity.
@@ -64,7 +65,8 @@ func (d *Daemon) invalidateCache() {
 }
 
 // TriggerPolicyUpdates triggers policy updates for every daemon's endpoint.
-func (d *Daemon) TriggerPolicyUpdates(added []policy.NumericIdentity) {
+// returns a waiting group which signalizes if all endpoints are regenerated.
+func (d *Daemon) TriggerPolicyUpdates(added []policy.NumericIdentity) *sync.WaitGroup {
 
 	if len(added) == 0 {
 		log.Debugf("Full policy recalculation triggered")
@@ -75,9 +77,12 @@ func (d *Daemon) TriggerPolicyUpdates(added []policy.NumericIdentity) {
 		d.invalidateCache()
 	}
 
+	var wg sync.WaitGroup
+
 	d.endpointsMU.RLock()
+	wg.Add(len(d.endpoints))
 	for k := range d.endpoints {
-		go func(ep *endpoint.Endpoint) {
+		go func(ep *endpoint.Endpoint, wg *sync.WaitGroup) {
 			ep.Mutex.RLock()
 			epID := ep.StringIDLocked()
 			ep.Mutex.RUnlock()
@@ -90,11 +95,14 @@ func (d *Daemon) TriggerPolicyUpdates(added []policy.NumericIdentity) {
 				ep.LogStatusOK(endpoint.Policy, "Policy regenerated")
 			}
 			if policyChanges {
-				ep.Regenerate(d)
+				<-ep.Regenerate(d)
 			}
-		}(d.endpoints[k])
+			wg.Done()
+		}(d.endpoints[k], &wg)
 	}
 	d.endpointsMU.RUnlock()
+
+	return &wg
 }
 
 // UpdatePolicyEnforcement returns whether policy enforcement needs to be
@@ -284,7 +292,34 @@ func (d *Daemon) PolicyDelete(labels labels.LabelArray) *apierror.APIError {
 		return apierror.New(DeletePolicyNotFoundCode, "policy not found")
 	}
 
-	d.TriggerPolicyUpdates([]policy.NumericIdentity{})
+	go func() {
+		wg := d.TriggerPolicyUpdates([]policy.NumericIdentity{})
+		// waiting on PR 870
+		//if d.PolicyEnabled() {
+		wg.Wait()
+		consumables := d.consumableCache.GetConsumables()
+		d.endpointsMU.RLock()
+		for _, ep := range d.endpoints {
+			ep.Mutex.RLock()
+			if ep.SecLabel == nil {
+				ep.Mutex.RUnlock()
+				continue
+			}
+			epSecID := ep.SecLabel.ID
+			ep.Mutex.RUnlock()
+
+			idsToKeep := map[uint32]bool{}
+			if v, ok := consumables[epSecID]; ok {
+				for _, consumer := range v {
+					idsToKeep[consumer.Uint32()] = true
+				}
+			}
+			log.Debugf("Keeping entries for %d: %+v", ep.ID, idsToKeep)
+			d.KeepCTEntryOf(ep, idsToKeep)
+		}
+		d.endpointsMU.RUnlock()
+		//}
+	}()
 	return nil
 }
 

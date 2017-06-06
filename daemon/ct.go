@@ -16,6 +16,7 @@ package main
 
 import (
 	"fmt"
+	"net"
 	"strconv"
 	"time"
 
@@ -31,7 +32,7 @@ const (
 	GcInterval int = 10
 )
 
-func runGC(e *endpoint.Endpoint, isLocal, isIPv6 bool) {
+func runGC(e *endpoint.Endpoint, isLocal, isIPv6 bool, filter *ctmap.GCFilter) {
 	var file string
 	var mapType string
 	// TODO: We need to optimize this a bit in future, so we traverse
@@ -67,7 +68,7 @@ func runGC(e *endpoint.Endpoint, isLocal, isIPv6 bool) {
 		return
 	}
 
-	deleted := ctmap.GC(m, mapType)
+	deleted := ctmap.GC(m, mapType, filter)
 
 	if deleted > 0 {
 		log.Debugf("Deleted %d entries from map %s", deleted, file)
@@ -78,9 +79,8 @@ func runGC(e *endpoint.Endpoint, isLocal, isIPv6 bool) {
 func (d *Daemon) EnableConntrackGC() {
 	go func() {
 		seenGlobal := false
+		sleepTime := time.Duration(GcInterval) * time.Second
 		for {
-			sleepTime := time.Duration(GcInterval) * time.Second
-
 			d.endpointsMU.RLock()
 
 			for k := range d.endpoints {
@@ -109,13 +109,13 @@ func (d *Daemon) EnableConntrackGC() {
 					}
 					seenGlobal = true
 				}
-
-				e.Mutex.RUnlock()
 				// We can unlock the endpoint mutex sense
 				// in runGC it will be locked as needed.
-				runGC(e, isLocal, true)
+				e.Mutex.RUnlock()
+
+				runGC(e, isLocal, true, ctmap.NewGCFilterBy(ctmap.GCFilterByTime))
 				if !d.conf.IPv4Disabled {
-					runGC(e, isLocal, false)
+					runGC(e, isLocal, false, ctmap.NewGCFilterBy(ctmap.GCFilterByTime))
 				}
 			}
 
@@ -124,4 +124,30 @@ func (d *Daemon) EnableConntrackGC() {
 			seenGlobal = false
 		}
 	}()
+}
+
+// KeepCTEntryOf cleans the connection tracking table keeping the endpoint's IPs
+// entries that have the alien_id equal to any of the given ids.
+func (d *Daemon) KeepCTEntryOf(e *endpoint.Endpoint, ids map[uint32]bool) {
+	var ip6, ip4 net.IP
+
+	e.Mutex.RLock()
+	isLocal := e.Opts.IsEnabled(endpoint.OptionConntrackLocal)
+	copy(ip6, e.IPv6.IP())
+	if !d.conf.IPv4Disabled {
+		copy(ip4, e.IPv4.IP())
+	}
+	// We can unlock the endpoint mutex since
+	// in runGC it will be locked as needed.
+	e.Mutex.RUnlock()
+
+	gcFilter := ctmap.NewGCFilterBy(ctmap.GCFilterByID)
+	gcFilter.IDsToKeep = ids
+	gcFilter.IP = ip6
+
+	runGC(e, isLocal, true, gcFilter)
+	if !d.conf.IPv4Disabled {
+		gcFilter.IP = ip4
+		runGC(e, isLocal, false, gcFilter)
+	}
 }
